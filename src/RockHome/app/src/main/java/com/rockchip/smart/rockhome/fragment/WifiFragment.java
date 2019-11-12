@@ -274,6 +274,7 @@ public class WifiFragment extends Fragment implements View.OnClickListener {
                         try {
                             mLoadingView.show(getActivity().getResources().getString(R.string.dialog_wifi_configuring));
                             boolean result = mClient.postWifiSetupInfo(ssid, pwd);
+                            Thread.sleep(3000);
                             if (result) {
                                 for (int i=0; i<20; i++) {
                                     result = mClient.checkWifiState();
@@ -282,9 +283,10 @@ public class WifiFragment extends Fragment implements View.OnClickListener {
                                         showMessage(getActivity().getResources().getString(R.string.connect_wifi_success));
                                         mClient.postConnectResult(true);
                                         showState(STATE.Layout_Guide);
+                                        mWifiManager.unregisterNetworkCallback();
                                         break;
                                     } else {
-                                        Thread.sleep(5 * 1000);
+                                        Thread.sleep(3000);
                                     }
                                 }
                                 if (!result) {

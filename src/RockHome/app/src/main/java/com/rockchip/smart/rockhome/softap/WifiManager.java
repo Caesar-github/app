@@ -5,10 +5,17 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.net.ConnectivityManager;
+import android.net.MacAddress;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.NetworkInfo;
+import android.net.NetworkRequest;
+import android.net.NetworkSpecifier;
 import android.net.wifi.ScanResult;
 import android.net.wifi.WifiConfiguration;
+import android.net.wifi.WifiNetworkSpecifier;
 import android.os.Build;
+import android.support.annotation.NonNull;
 import android.text.TextUtils;
 import android.util.Log;
 
@@ -28,10 +35,14 @@ import java.util.concurrent.locks.ReentrantLock;
  */
 
 public class WifiManager {
-
+    private final String TAG = "WifiManager";
     private Context mContext;
     private android.net.wifi.WifiManager mWifiManager;
+    private ConnectivityManager mConnectivityManager;
     private android.net.wifi.WifiManager.WifiLock mWifiLock;
+    private ConnectivityManager.NetworkCallback mNetworkCallback;
+    private boolean mIsRequestNetwork = false;
+
     private static volatile WifiManager mInstance;
 
     public static WifiManager getInstance(Context context) {
@@ -48,8 +59,43 @@ public class WifiManager {
     private WifiManager(Context context) {
         mContext = context;
         mWifiManager = (android.net.wifi.WifiManager) context.getSystemService(Context.WIFI_SERVICE);
+        mConnectivityManager = (ConnectivityManager)mContext.getSystemService(Context.CONNECTIVITY_SERVICE);
         mWifiLock = mWifiManager.createWifiLock("Rock Home");
         mWifiReceiver = new WifiReceiver();
+
+        mNetworkCallback = new ConnectivityManager.NetworkCallback() {
+            @Override
+            public void onAvailable(Network network) {
+                // do success processing here..
+                Log.d(TAG, "onAvailable");
+            }
+
+            @Override
+            public void onUnavailable() {
+                // do failure processing here..
+                Log.d(TAG, "onUnavailable");
+            }
+
+            @Override
+            public void onCapabilitiesChanged(@NonNull Network network,
+                                              @NonNull NetworkCapabilities networkCapabilities) {
+
+                Log.d(TAG, "onCapabilitiesChanged");
+                if(networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET))
+                    Log.d(TAG, "NET_CAPABILITY_INTERNET");
+
+                if(networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED))
+                    Log.d(TAG, "NET_CAPABILITY_VALIDATED");
+            }
+        };
+    }
+
+    public void unregisterNetworkCallback() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && mIsRequestNetwork) {
+            Log.d(TAG, "unregisterNetworkCallback");
+            mConnectivityManager.unregisterNetworkCallback(mNetworkCallback);
+            mIsRequestNetwork = false;
+        }
     }
 
     public void acquireWifiLock() {
@@ -71,8 +117,7 @@ public class WifiManager {
     }
 
     public boolean isWifiConnected() {
-        ConnectivityManager connectivityManager = (ConnectivityManager)mContext.getSystemService(Context.CONNECTIVITY_SERVICE);
-        NetworkInfo wifiNetworkInfo = connectivityManager.getNetworkInfo(ConnectivityManager.TYPE_WIFI);
+        NetworkInfo wifiNetworkInfo = mConnectivityManager.getNetworkInfo(ConnectivityManager.TYPE_WIFI);
         if(wifiNetworkInfo.isConnected()) {
             return true ;
         }
@@ -136,6 +181,9 @@ public class WifiManager {
                 connectedSsid = getConnectWifiSsid();
             }
             for (ScanResult result : results) {
+                if(result.SSID != null)
+                    Log.d(TAG, "ScanResult: ssid = " + result.SSID.trim() + ", capabilities = " + result.capabilities);
+
                 if (result.SSID == null || result.SSID.length() == 0 || result.capabilities.contains("[IBSS]")
                         || !result.SSID.trim().startsWith("Rockchip-SoftAp")) {
                     continue;
@@ -161,6 +209,26 @@ public class WifiManager {
         return transformResults(scan());
     }
 
+    public boolean connCustomNetWorkQ(String ssid, String bssid, Data type) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            NetworkSpecifier specifier = new WifiNetworkSpecifier.Builder()
+                            .setSsid(ssid)
+                            .setBssid(MacAddress.fromString(bssid))
+                            .build();
+
+            NetworkRequest request = new NetworkRequest.Builder()
+                            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                            .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                            .setNetworkSpecifier(specifier)
+                            .build();
+
+            mConnectivityManager.requestNetwork(request, mNetworkCallback);
+            mIsRequestNetwork = true;
+        }
+
+        return true;
+    }
+
     public boolean connCustomNetWork(String ssid, String pwd, Data type) {
         int netId = -1;
         List<WifiConfiguration> wifiConfigurationList = mWifiManager.getConfiguredNetworks();
@@ -174,7 +242,7 @@ public class WifiManager {
 
         if (netId != -1) {
             boolean res = mWifiManager.removeNetwork(netId);
-            Log.d("WifiFragment", "Wifi had Configuration, remove first. " + netId + "; res:" + res);
+            Log.d(TAG, "Wifi had Configuration, remove first. " + netId + "; res:" + res);
             if (!res) {
                 return false;
             }
@@ -183,21 +251,29 @@ public class WifiManager {
         WifiConfiguration configuration = createWifiConfig(ssid, pwd, type);
         netId = mWifiManager.addNetwork(configuration);
         if (netId == -1) {
-            Log.d("WifiFragment", "Add configuration failed...");
+            Log.d(TAG, "Add configuration failed...");
             return false;
         }
 
         Method connectMethod = connectWifiByReflectMethod(netId);
         if (connectMethod == null) {
-            Log.d("WifiFragment", "connectWifiByReflectMethod failed...");
+            Log.d(TAG, "connectWifiByReflectMethod failed...");
             return mWifiManager.enableNetwork(netId, true);
         }
         return  true;
     }
 
+    public boolean connCustomNetWorkBySdk(String ssid, String pwd, String bssid, Data type) {
+        Log.d(TAG, "Build.VERSION.SDK_INT: " + Build.VERSION.SDK_INT);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+            return connCustomNetWorkQ(ssid, bssid, type);
+        else
+            return connCustomNetWork(ssid, pwd, type);
+    }
+
     public void connToAp(String ssid) {
-        Log.d("WifiFragment", "connToAp ssid:" + ssid);
-        connCustomNetWork(ssid, "", Data.WIFI_CIPHER_NOPASS);
+        Log.d(TAG, "connToAp ssid:" + ssid);
+        connCustomNetWorkBySdk(ssid, "", "", Data.WIFI_CIPHER_NOPASS);
     }
 
     /**
@@ -228,7 +304,7 @@ public class WifiManager {
      * @return
      **/
     private WifiConfiguration createWifiConfig(String SSID, String password, Data type) {
-        Log.d("WifiFragment", "SSID = " + SSID + "password = " + password + "type = " + type);
+        Log.d(TAG, "SSID = " + SSID + "; password = " + password + "; type = " + type);
         WifiConfiguration config = new WifiConfiguration();
 
         config.allowedAuthAlgorithms.clear();
@@ -236,7 +312,6 @@ public class WifiManager {
         config.allowedKeyManagement.clear();
         config.allowedPairwiseCiphers.clear();
         config.allowedProtocols.clear();
-
         config.SSID = "\"" + SSID + "\"";
 
         if (type == Data.WIFI_CIPHER_NOPASS) {
@@ -308,7 +383,7 @@ public class WifiManager {
         Method connectMethod = null;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
             // 反射方法： connect(int, listener) , 4.2 <= phone's android version
-            Log.d("WifiFragment", "1111");
+            Log.d(TAG, "1111");
             for (Method methodSub : mWifiManager.getClass().getDeclaredMethods()) {
                 if ("connect".equalsIgnoreCase(methodSub.getName())) {
                     Class<?>[] types = methodSub.getParameterTypes();
@@ -321,10 +396,10 @@ public class WifiManager {
             }
             if (connectMethod != null) {
                 try {
-                    Log.d("WifiFragment", "2222");
+                    Log.d(TAG, "2222");
                     connectMethod.invoke(mWifiManager, netId, null);
                 } catch (Exception e) {
-                    Log.d("WifiFragment", "3333" + Log.getStackTraceString(e));
+                    Log.d(TAG, "3333" + Log.getStackTraceString(e));
                     e.printStackTrace();
                     return null;
                 }
@@ -428,6 +503,7 @@ public class WifiManager {
 
         @Override
         public void onReceive(Context context, Intent intent) {
+            //Log.d(TAG, "onReceive: " + intent.getAction());
             switch (intent.getAction()) {
                 case android.net.wifi.WifiManager.WIFI_STATE_CHANGED_ACTION:
                     handleWifiStateChanged(intent);
@@ -481,10 +557,18 @@ public class WifiManager {
         }
 
         private void handleNetworkStateChanged(Intent intent) {
-            Log.d("WifiFragment", "handleNetworkStateChanged...");
+            Log.d(TAG, "handleNetworkStateChanged...");
             NetworkInfo networkInfo = intent.getParcelableExtra(android.net.wifi.WifiManager.EXTRA_NETWORK_INFO);
+            if(null != networkInfo)
+                Log.d(TAG, "networkInfo state: " + networkInfo.getState());
+
             if (null != networkInfo && networkInfo.isConnected()) {
-                android.net.wifi.WifiInfo wifiInfo = intent.getParcelableExtra(android.net.wifi.WifiManager.EXTRA_WIFI_INFO);
+                android.net.wifi.WifiInfo wifiInfo = null;
+
+                wifiInfo = intent.getParcelableExtra(android.net.wifi.WifiManager.EXTRA_WIFI_INFO);
+                if(wifiInfo == null)
+                    wifiInfo = mWifiManager.getConnectionInfo(); //for android 9 and 9+
+
                 if (wifiInfo != null && info != null) {
                     if (wifiInfo.getBSSID().equals(info.getBssid()) && !TextUtils.isEmpty(getConnectWifiSsid())) {
                         if (mWifiConnectListener != null) {
@@ -517,7 +601,9 @@ public class WifiManager {
                     mWifiConnectListener.onConnectStart(info);
                 }
 
-                Log.d("WifiFragment", "BSSID:" + mWifiManager.getConnectionInfo().getBSSID() + "; Bssid:" + info.getBssid());
+                //Log.d(TAG, "isWifiConnected(): " + isWifiConnected());
+                //Log.d(TAG, "SSID: " + mWifiManager.getConnectionInfo().getSSID());
+                Log.d(TAG, "BSSID: " + mWifiManager.getConnectionInfo().getBSSID() + "; Bssid: " + info.getBssid());
                 if (isWifiConnected() && mWifiManager.getConnectionInfo().getBSSID().equals(info.getBssid())) {
                     if (mWifiConnectListener != null) {
                         mWifiConnectListener.onConnectSuccess(info, mWifiManager.getConnectionInfo().getIpAddress());
@@ -525,10 +611,10 @@ public class WifiManager {
                     return;
                 }
 
-                Log.d("WifiFragment", "connect registerReceiver " + mWifiReceiver.isOrderedBroadcast());
+                Log.d(TAG, "connect registerReceiver " + mWifiReceiver.isOrderedBroadcast());
                 registerWifiReceiver(new IntentFilter(android.net.wifi.WifiManager.NETWORK_STATE_CHANGED_ACTION));
 
-                if (!connCustomNetWork(info.getSsid(), pwd, getType(info))) {
+                if (!connCustomNetWorkBySdk(info.getSsid(), pwd, info.getBssid(), getType(info))) {
                     unregisterWifiReceiver();
                     if (mWifiConnectListener != null) {
                         mWifiConnectListener.onConnectFailed(info, -1);
@@ -549,7 +635,7 @@ public class WifiManager {
                 mLock1.unlock();
 
                 //删除注册的监听类对象
-                Log.d("WifiFragment", "connect unregisterReceiver");
+                Log.d(TAG, "connect unregisterReceiver");
                 unregisterWifiReceiver();
             }
         }).start();
@@ -567,12 +653,13 @@ public class WifiManager {
             @Override
             public void run() {
                 //注册接收WIFI扫描结果的监听类对象
-                Log.d("WifiFragment", "search registerReceiver");
+                Log.d(TAG, "search registerReceiver");
                 registerWifiReceiver(new IntentFilter(android.net.wifi.WifiManager.SCAN_RESULTS_AVAILABLE_ACTION));
 
                 //开始扫描
                 if (mSearchWifiListener != null)
                     mSearchWifiListener.onScanStart();
+
                 mWifiManager.startScan();
 
                 mLock.lock();
@@ -591,7 +678,7 @@ public class WifiManager {
                 mLock.unlock();
 
                 //删除注册的监听类对象
-                Log.d("WifiFragment", "search unregisterReceiver");
+                Log.d(TAG, "search unregisterReceiver");
                 unregisterWifiReceiver();
             }
         }).start();
